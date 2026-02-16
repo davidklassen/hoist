@@ -17,6 +17,10 @@ func newRootCmd() *cobra.Command {
 	}
 	addDeployToRoot(cmd)
 	cmd.AddCommand(newTagCmd())
+	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newBuildsCmd())
+	cmd.AddCommand(newRollbackCmd())
+	cmd.AddCommand(newLogsCmd())
 	return cmd
 }
 

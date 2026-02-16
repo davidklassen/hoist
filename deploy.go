@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -44,19 +43,30 @@ type buildsProvider interface {
 }
 
 type deployer interface {
-	current(ctx context.Context, service, env string) (deploy, error)
 	deploy(ctx context.Context, service, env, tag, oldTag string) error
+}
+
+type historyProvider interface {
+	current(ctx context.Context, service, env string) (deploy, error)
+	previous(ctx context.Context, service, env string) (deploy, error)
+}
+
+type logsProvider interface {
+	tail(ctx context.Context, service, env string, n int, since string) error
 }
 
 type providers struct {
 	builds    map[string]buildsProvider
 	deployers map[string]deployer
+	history   map[string]historyProvider
+	logs      map[string]logsProvider
 }
 
 type deployOpts struct {
 	Services []string
 	Env      string
 	Build    string
+	Tags     map[string]string // pre-resolved per-service tags (skips build select)
 	Yes      bool
 }
 
@@ -93,15 +103,19 @@ func runDeploy(ctx context.Context, cfg config, p providers, opts deployOpts) er
 		if len(envs) == 0 {
 			return fmt.Errorf("no common environments across selected services")
 		}
-		result, err := tea.NewProgram(newSingleSelectModel("Select environment:", envs)).Run()
-		if err != nil {
-			return err
+		if len(envs) == 1 {
+			env = envs[0]
+		} else {
+			result, err := tea.NewProgram(newSingleSelectModel("Select environment:", envs)).Run()
+			if err != nil {
+				return err
+			}
+			m := result.(singleSelectModel)
+			if m.cancelled {
+				return errCancelled
+			}
+			env = m.items[m.cursor]
 		}
-		m := result.(singleSelectModel)
-		if m.cancelled {
-			return errCancelled
-		}
-		env = m.items[m.cursor]
 	}
 
 	for _, svc := range services {
@@ -114,39 +128,51 @@ func runDeploy(ctx context.Context, cfg config, p providers, opts deployOpts) er
 	previousTags := make(map[string]string)
 	for _, svc := range services {
 		svcCfg := cfg.Services[svc]
-		d, ok := p.deployers[svcCfg.Type]
+		hp, ok := p.history[svcCfg.Type]
 		if !ok {
 			continue
 		}
-		cur, err := d.current(ctx, svc, env)
-		if err == nil && cur.Tag != "" {
+		cur, err := hp.current(ctx, svc, env)
+		if err != nil {
+			return fmt.Errorf("getting current deploy for %s: %w", svc, err)
+		}
+		if cur.Tag != "" {
 			liveTags[cur.Tag] = true
 			previousTags[svc] = cur.Tag
 		}
 	}
 
-	bp := buildsForServices(cfg, p, services)
+	// Resolve per-service tags: either pre-provided, from --build flag, or interactive
+	tags := opts.Tags
+	if tags == nil {
+		bp := buildsForServices(cfg, p, services)
 
-	var buildTag string
-	if opts.Build != "" {
-		var err error
-		buildTag, err = resolveBuildTag(ctx, bp, opts.Build)
-		if err != nil {
-			return fmt.Errorf("resolving build: %w", err)
+		var buildTag string
+		if opts.Build != "" {
+			var err error
+			buildTag, err = resolveBuildTag(ctx, bp, opts.Build)
+			if err != nil {
+				return fmt.Errorf("resolving build: %w", err)
+			}
+		} else {
+			result, err := tea.NewProgram(newBuildPickerModel(bp, liveTags, env)).Run()
+			if err != nil {
+				return fmt.Errorf("build picker: %w", err)
+			}
+			bm := result.(buildPickerModel)
+			if bm.cancelled {
+				return errCancelled
+			}
+			if bm.cursor >= len(bm.builds) {
+				return fmt.Errorf("no build selected")
+			}
+			buildTag = bm.builds[bm.cursor].Tag
 		}
-	} else {
-		result, err := tea.NewProgram(newBuildPickerModel(bp, liveTags, env)).Run()
-		if err != nil {
-			return fmt.Errorf("build picker: %w", err)
+
+		tags = make(map[string]string, len(services))
+		for _, svc := range services {
+			tags[svc] = buildTag
 		}
-		bm := result.(buildPickerModel)
-		if bm.cancelled {
-			return errCancelled
-		}
-		if bm.cursor >= len(bm.builds) {
-			return fmt.Errorf("no build selected")
-		}
-		buildTag = bm.builds[bm.cursor].Tag
 	}
 
 	if !opts.Yes {
@@ -155,7 +181,7 @@ func runDeploy(ctx context.Context, cfg config, p providers, opts deployOpts) er
 			changes = append(changes, serviceChange{
 				service: svc,
 				oldTag:  previousTags[svc],
-				newTag:  buildTag,
+				newTag:  tags[svc],
 			})
 		}
 		result, err := tea.NewProgram(newConfirmModel(env, changes)).Run()
@@ -168,11 +194,15 @@ func runDeploy(ctx context.Context, cfg config, p providers, opts deployOpts) er
 		}
 	}
 
-	return deployAllWithUI(ctx, cfg, p, services, env, buildTag, previousTags)
+	return deployAllWithUI(ctx, cfg, p, services, env, tags, previousTags)
 }
 
 // deployAllWithUI runs parallel deploys with TUI progress display.
-func deployAllWithUI(ctx context.Context, cfg config, p providers, services []string, env, tag string, previousTags map[string]string) error {
+// tags maps each service to the tag it should be deployed to.
+func deployAllWithUI(ctx context.Context, cfg config, p providers, services []string, env string, tags map[string]string, previousTags map[string]string) error {
+	deployCtx, cancelDeploy := context.WithCancel(ctx)
+	defer cancelDeploy()
+
 	dm := newDeployModel(services)
 	prog := tea.NewProgram(dm)
 
@@ -182,30 +212,76 @@ func deployAllWithUI(ctx context.Context, cfg config, p providers, services []st
 		go func(svc string) {
 			defer wg.Done()
 			oldTag := previousTags[svc]
-			err := deployService(ctx, cfg, p, svc, env, tag, oldTag)
+			err := deployService(deployCtx, cfg, p, svc, env, tags[svc], oldTag)
 			prog.Send(serviceStatusMsg{service: svc, err: err})
 		}(svc)
 	}
 
 	finalModel, err := prog.Run()
 	if err != nil {
+		cancelDeploy()
 		wg.Wait()
 		return fmt.Errorf("deploy UI: %w", err)
 	}
-	wg.Wait()
 
 	dm = finalModel.(deployModel)
+
+	// ctrl+c during deploying phase: cancel context and wait for goroutines
+	if dm.phase == phaseDeploying {
+		cancelDeploy()
+		wg.Wait()
+		return errCancelled
+	}
+
+	wg.Wait()
+
 	if dm.phase == phaseComplete {
 		return nil
 	}
 
-	// Rollback prompt was shown; the model has the user's choice
-	// For now, return nil — rollback is handled via deployAll below
+	var rollbackServices []string
+	switch dm.rollback {
+	case rollbackAll:
+		rollbackServices = services
+	case rollbackFailed:
+		rollbackServices = dm.failed
+	case rollbackNone:
+		return nil
+	}
+
+	rollbackTags := make(map[string]string, len(rollbackServices))
+	for _, svc := range rollbackServices {
+		if prev, ok := previousTags[svc]; ok && prev != "" {
+			rollbackTags[svc] = prev
+		} else {
+			fmt.Printf("skipping %s: no previous deploy\n", svc)
+		}
+	}
+	if len(rollbackTags) == 0 {
+		fmt.Println("Nothing to roll back.")
+		return nil
+	}
+
+	var rollbackTargets []string
+	for svc := range rollbackTags {
+		rollbackTargets = append(rollbackTargets, svc)
+	}
+
+	fmt.Printf("Rolling back %d service(s)...\n", len(rollbackTargets))
+	result, err := deployAll(ctx, cfg, p, rollbackTargets, env, rollbackTags, tags)
+	if err != nil {
+		return fmt.Errorf("rollback: %w", err)
+	}
+	if len(result.failed) > 0 {
+		return fmt.Errorf("rollback failed for: %v", result.failed)
+	}
+	fmt.Println("Rollback complete.")
 	return nil
 }
 
 // deployAll runs parallel deploys without TUI. Returns results for the caller to handle.
-func deployAll(ctx context.Context, cfg config, p providers, services []string, env, tag string, previousTags map[string]string) (deployResult, error) {
+// tags maps each service to the tag it should be deployed to.
+func deployAll(ctx context.Context, cfg config, p providers, services []string, env string, tags map[string]string, previousTags map[string]string) (deployResult, error) {
 	type result struct {
 		service string
 		err     error
@@ -219,7 +295,7 @@ func deployAll(ctx context.Context, cfg config, p providers, services []string, 
 		go func(svc string) {
 			defer wg.Done()
 			oldTag := previousTags[svc]
-			err := deployService(ctx, cfg, p, svc, env, tag, oldTag)
+			err := deployService(ctx, cfg, p, svc, env, tags[svc], oldTag)
 			results <- result{service: svc, err: err}
 		}(svc)
 	}
@@ -251,24 +327,6 @@ func deployService(ctx context.Context, cfg config, p providers, service, env, t
 	return d.deploy(ctx, service, env, tag, oldTag)
 }
 
-
-func rollback(ctx context.Context, cfg config, p providers, services []string, env string, previousTags map[string]string) error {
-	var errs []string
-	for _, svc := range services {
-		oldTag, ok := previousTags[svc]
-		if !ok || oldTag == "" {
-			continue
-		}
-		err := deployService(ctx, cfg, p, svc, env, oldTag, "")
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", svc, err))
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("rollback errors: %s", strings.Join(errs, "; "))
-	}
-	return nil
-}
 
 func resolveBuildTag(ctx context.Context, bp buildsProvider, value string) (string, error) {
 	if _, err := parseTag(value); err == nil {

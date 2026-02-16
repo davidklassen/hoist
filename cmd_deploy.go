@@ -28,7 +28,7 @@ func addDeployToRoot(cmd *cobra.Command) {
 			return err
 		}
 
-		p := newProviders()
+		p := newProviders(cfg)
 
 		opts := deployOpts{
 			Services: services,
@@ -41,14 +41,20 @@ func addDeployToRoot(cmd *cobra.Command) {
 	}
 }
 
-func newProviders() providers {
+func withBuildMeta(b build, message, author string) build {
+	b.Message = message
+	b.Author = author
+	return b
+}
+
+func newProviders(cfg config) providers {
 	now := time.Now().UTC()
 	sampleBuilds := []build{
-		buildFromTag(tag{Branch: "main", SHA: "f82bc01", Time: now.Add(-1 * time.Hour)}),
-		buildFromTag(tag{Branch: "main", SHA: "a1b2c3d", Time: now.Add(-2 * time.Hour)}),
-		buildFromTag(tag{Branch: "add-client-tools", SHA: "b2c4e88", Time: now.Add(-3 * time.Hour)}),
-		buildFromTag(tag{Branch: "fix-auth", SHA: "c3d5f99", Time: now.Add(-4 * time.Hour)}),
-		buildFromTag(tag{Branch: "main", SHA: "d4e6a00", Time: now.Add(-5 * time.Hour)}),
+		withBuildMeta(buildFromTag(tag{Branch: "main", SHA: "f82bc01", Time: now.Add(-1 * time.Hour)}), "fix: resolve timeout on large uploads", "alice"),
+		withBuildMeta(buildFromTag(tag{Branch: "main", SHA: "a1b2c3d", Time: now.Add(-2 * time.Hour)}), "feat: add webhook retry logic", "bob"),
+		withBuildMeta(buildFromTag(tag{Branch: "add-client-tools", SHA: "b2c4e88", Time: now.Add(-3 * time.Hour)}), "feat: add client-side tooling", "alice"),
+		withBuildMeta(buildFromTag(tag{Branch: "fix-auth", SHA: "c3d5f99", Time: now.Add(-4 * time.Hour)}), "fix: auth token refresh race condition", "carol"),
+		withBuildMeta(buildFromTag(tag{Branch: "main", SHA: "d4e6a00", Time: now.Add(-5 * time.Hour)}), "chore: update dependencies", "bob"),
 	}
 
 	return providers{
@@ -59,6 +65,14 @@ func newProviders() providers {
 		deployers: map[string]deployer{
 			"server": &serverDeployer{},
 			"static": &staticDeployer{},
+		},
+		history: map[string]historyProvider{
+			"server": &serverHistoryProvider{},
+			"static": &staticHistoryProvider{},
+		},
+		logs: map[string]logsProvider{
+			"server": &serverLogsProvider{cfg: cfg},
+			"static": &staticLogsProvider{cfg: cfg},
 		},
 	}
 }
