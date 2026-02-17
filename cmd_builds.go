@@ -46,6 +46,8 @@ func newBuildsCmd() *cobra.Command {
 				builds = builds[:limit]
 			}
 
+			enrichBuilds(builds)
+
 			fmt.Print(formatBuildsTable(builds, limit, hasMore))
 			return nil
 		},
@@ -55,6 +57,22 @@ func newBuildsCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&cfgPath, "config", "c", "hoist.yml", "config file path")
 
 	return cmd
+}
+
+func enrichBuilds(builds []build) {
+	for i, b := range builds {
+		out, err := gitOutput("git", "log", "-1", "--format=%s\n%an", b.SHA)
+		if err != nil {
+			continue
+		}
+		parts := strings.SplitN(out, "\n", 2)
+		if len(parts) >= 1 {
+			builds[i].Message = parts[0]
+		}
+		if len(parts) >= 2 {
+			builds[i].Author = parts[1]
+		}
+	}
 }
 
 func formatBuildTime(t time.Time) string {
