@@ -80,8 +80,11 @@ func newRollbackCmd() *cobra.Command {
 				return err
 			}
 
-			p := newProviders(cfg)
 			ctx := context.Background()
+			p, err := newProviders(ctx, cfg)
+			if err != nil {
+				return err
+			}
 
 			res, err := resolveRollbackTargets(ctx, cfg, p, services, env, cmd.OutOrStdout())
 			if err != nil {

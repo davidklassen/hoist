@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,7 +18,13 @@ type statusRow struct {
 }
 
 func getStatus(ctx context.Context, cfg config, p providers, envFilter string) ([]statusRow, error) {
-	var rows []statusRow
+	type query struct {
+		name string
+		env  string
+		svc  serviceConfig
+	}
+
+	var queries []query
 	for _, name := range sortedServiceNames(cfg) {
 		svc := cfg.Services[name]
 		envs := make([]string, 0, len(svc.Env))
@@ -30,32 +37,54 @@ func getStatus(ctx context.Context, cfg config, p providers, envFilter string) (
 			if envFilter != "" && env != envFilter {
 				continue
 			}
-
-			hp, ok := p.history[svc.Type]
-			if !ok {
+			if _, ok := p.history[svc.Type]; !ok {
 				continue
 			}
+			queries = append(queries, query{name: name, env: env, svc: svc})
+		}
+	}
 
-			cur, err := hp.current(ctx, name, env)
+	type result struct {
+		index int
+		row   statusRow
+		err   error
+	}
+
+	results := make([]result, len(queries))
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Add(1)
+		go func(i int, q query) {
+			defer wg.Done()
+			hp := p.history[q.svc.Type]
+			cur, err := hp.current(ctx, q.name, q.env)
 			if err != nil {
-				return nil, fmt.Errorf("getting status for %s/%s: %w", name, env, err)
+				results[i] = result{err: fmt.Errorf("getting status for %s/%s: %w", q.name, q.env, err)}
+				return
 			}
 
 			row := statusRow{
-				Service: name,
-				Env:     env,
+				Service: q.name,
+				Env:     q.env,
 				Tag:     cur.Tag,
 				Uptime:  cur.Uptime,
 			}
-
-			if svc.Type == "server" {
+			if q.svc.Type == "server" {
 				row.Health = "healthy"
 			} else {
 				row.Health = "-"
 			}
+			results[i] = result{row: row}
+		}(i, q)
+	}
+	wg.Wait()
 
-			rows = append(rows, row)
+	rows := make([]statusRow, 0, len(queries))
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
 		}
+		rows = append(rows, r.row)
 	}
 	return rows, nil
 }
@@ -76,14 +105,11 @@ func formatStatusTable(rows []statusRow) string {
 	}
 
 	// Calculate column widths
-	svcW, envW, tagW, upW, healthW := len("SERVICE"), len("ENV"), len("TAG"), len("UPTIME"), len("HEALTH")
+	svcW, tagW, upW, healthW := len("SERVICE"), len("TAG"), len("UPTIME"), len("HEALTH")
 	for _, r := range rows {
 		label := r.Service + "-" + r.Env
 		if len(label) > svcW {
 			svcW = len(label)
-		}
-		if len(r.Env) > envW {
-			envW = len(r.Env)
 		}
 		if len(r.Tag) > tagW {
 			tagW = len(r.Tag)

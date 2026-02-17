@@ -29,8 +29,11 @@ func newLogsCmd() *cobra.Command {
 				return err
 			}
 
-			p := newProviders(cfg)
 			ctx := context.Background()
+			p, err := newProviders(ctx, cfg)
+			if err != nil {
+				return err
+			}
 
 			// Default to all services
 			targets := services

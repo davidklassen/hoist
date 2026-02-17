@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 type serverLogsProvider struct {
@@ -18,6 +19,6 @@ func (p *serverLogsProvider) tail(_ context.Context, service, env string, n int,
 	args := dockerLogsArgs(container, since, n, follow)
 
 	// TODO: SSH into node and run docker logs
-	fmt.Printf("[%s] Would run on node %q: docker %s\n", service, ec.Node, joinArgs(args))
+	fmt.Printf("[%s] Would run on node %q: docker %s\n", service, ec.Node, strings.Join(args, " "))
 	return nil
 }

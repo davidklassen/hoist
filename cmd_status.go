@@ -24,7 +24,10 @@ func newStatusCmd() *cobra.Command {
 				return err
 			}
 
-			p := newProviders(cfg)
+			p, err := newProviders(context.Background(), cfg)
+			if err != nil {
+				return err
+			}
 			rows, err := getStatus(context.Background(), cfg, p, env)
 			if err != nil {
 				return err

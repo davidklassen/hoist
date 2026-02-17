@@ -20,14 +20,3 @@ func dockerLogsArgs(container, since string, n int, follow bool) []string {
 	args = append(args, container)
 	return args
 }
-
-func joinArgs(args []string) string {
-	result := ""
-	for i, a := range args {
-		if i > 0 {
-			result += " "
-		}
-		result += a
-	}
-	return result
-}

@@ -26,7 +26,10 @@ func newBuildsCmd() *cobra.Command {
 				return err
 			}
 
-			p := newProviders(cfg)
+			p, err := newProviders(context.Background(), cfg)
+			if err != nil {
+				return err
+			}
 			services := sortedServiceNames(cfg)
 			bp := buildsForServices(cfg, p, services)
 			if bp == nil {

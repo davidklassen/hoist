@@ -72,8 +72,7 @@ type deployOpts struct {
 
 // deployResult holds the outcome of a parallel deploy.
 type deployResult struct {
-	failed       []string
-	previousTags map[string]string
+	failed []string
 }
 
 func runDeploy(ctx context.Context, cfg config, p providers, opts deployOpts) error {
@@ -311,8 +310,7 @@ func deployAll(ctx context.Context, cfg config, p providers, services []string, 
 	}
 
 	return deployResult{
-		failed:       failed,
-		previousTags: previousTags,
+		failed: failed,
 	}, nil
 }
 

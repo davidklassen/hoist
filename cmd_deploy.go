@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 )
 
@@ -28,7 +31,10 @@ func addDeployToRoot(cmd *cobra.Command) {
 			return err
 		}
 
-		p := newProviders(cfg)
+		p, err := newProviders(context.Background(), cfg)
+		if err != nil {
+			return err
+		}
 
 		opts := deployOpts{
 			Services: services,
@@ -47,7 +53,13 @@ func withBuildMeta(b build, message, author string) build {
 	return b
 }
 
-func newProviders(cfg config) providers {
+func newProviders(ctx context.Context, cfg config) (providers, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return providers{}, fmt.Errorf("loading AWS config: %w", err)
+	}
+	s3Client := s3.NewFromConfig(awsCfg)
+
 	now := time.Now().UTC()
 	sampleBuilds := []build{
 		withBuildMeta(buildFromTag(tag{Branch: "main", SHA: "f82bc01", Time: now.Add(-1 * time.Hour)}), "fix: resolve timeout on large uploads", "alice"),
@@ -68,11 +80,11 @@ func newProviders(cfg config) providers {
 		},
 		history: map[string]historyProvider{
 			"server": &serverHistoryProvider{cfg: cfg, run: sshRun},
-			"static": &staticHistoryProvider{},
+			"static": &staticHistoryProvider{cfg: cfg, s3: s3Client},
 		},
 		logs: map[string]logsProvider{
 			"server": &serverLogsProvider{cfg: cfg},
 			"static": &staticLogsProvider{cfg: cfg},
 		},
-	}
+	}, nil
 }
