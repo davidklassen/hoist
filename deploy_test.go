@@ -630,6 +630,84 @@ func TestDeployAllContextCancellation(t *testing.T) {
 	}
 }
 
+func TestBuildsForServicesIntersection(t *testing.T) {
+	cfg := testConfig()
+
+	shared1 := "main-abc1234-20250101100000"
+	shared2 := "main-def5678-20250101090000"
+	serverOnly := "main-aaa1111-20250101080000"
+	staticOnly := "main-bbb2222-20250101070000"
+
+	serverBuilds := &mockBuildsProvider{builds: []build{
+		{Tag: shared1, Branch: "main", SHA: "abc1234", Time: mustParseTag(t, shared1).Time},
+		{Tag: shared2, Branch: "main", SHA: "def5678", Time: mustParseTag(t, shared2).Time},
+		{Tag: serverOnly, Branch: "main", SHA: "aaa1111", Time: mustParseTag(t, serverOnly).Time},
+	}}
+	staticBuilds := &mockBuildsProvider{builds: []build{
+		{Tag: shared1, Branch: "main", SHA: "abc1234", Time: mustParseTag(t, shared1).Time},
+		{Tag: shared2, Branch: "main", SHA: "def5678", Time: mustParseTag(t, shared2).Time},
+		{Tag: staticOnly, Branch: "main", SHA: "bbb2222", Time: mustParseTag(t, staticOnly).Time},
+	}}
+
+	p := providers{
+		builds: map[string]buildsProvider{
+			"server": serverBuilds,
+			"static": staticBuilds,
+		},
+	}
+
+	bp := buildsForServices(cfg, p, []string{"backend", "frontend"})
+	builds, err := bp.listBuilds(context.Background(), 10, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(builds) != 2 {
+		t.Fatalf("expected 2 builds (intersection), got %d", len(builds))
+	}
+	if builds[0].Tag != shared1 {
+		t.Errorf("builds[0].Tag = %q, want %q", builds[0].Tag, shared1)
+	}
+	if builds[1].Tag != shared2 {
+		t.Errorf("builds[1].Tag = %q, want %q", builds[1].Tag, shared2)
+	}
+}
+
+func mustParseTag(t *testing.T, s string) tag {
+	t.Helper()
+	tg, err := parseTag(s)
+	if err != nil {
+		t.Fatalf("parseTag(%q): %v", s, err)
+	}
+	return tg
+}
+
+func TestBuildsForServicesSingleType(t *testing.T) {
+	cfg := config{
+		Services: map[string]serviceConfig{
+			"api":     {Type: "server"},
+			"workers": {Type: "server"},
+		},
+	}
+
+	bp := &mockBuildsProvider{builds: []build{
+		{Tag: "main-abc1234-20250101100000"},
+	}}
+	p := providers{
+		builds: map[string]buildsProvider{"server": bp},
+	}
+
+	result := buildsForServices(cfg, p, []string{"api", "workers"})
+	// When all services use the same provider, no intersection needed — return it directly
+	builds, err := result.listBuilds(context.Background(), 10, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(builds) != 1 {
+		t.Fatalf("expected 1 build, got %d", len(builds))
+	}
+}
+
 func TestDeployAllParallelExecution(t *testing.T) {
 	cfg := testConfig()
 	p, md := testProviders(nil, nil)

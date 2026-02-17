@@ -383,13 +383,92 @@ func envIntersection(cfg config, services []string) []string {
 	return result
 }
 
-// buildsForServices returns the first matching builds provider for the selected services.
+// buildsForServices returns a builds provider for the selected services.
+// When services use different provider types, it returns a merged provider
+// that intersects results — only builds present in all providers are returned.
 func buildsForServices(cfg config, p providers, services []string) buildsProvider {
+	seen := map[string]bool{}
+	var unique []buildsProvider
 	for _, svc := range services {
 		t := cfg.Services[svc].Type
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
 		if bp, ok := p.builds[t]; ok {
-			return bp
+			unique = append(unique, bp)
 		}
 	}
-	return nil
+	if len(unique) == 0 {
+		return nil
+	}
+	if len(unique) == 1 {
+		return unique[0]
+	}
+	return &mergedBuildsProvider{providers: unique}
+}
+
+// mergedBuildsProvider intersects builds from multiple providers.
+// Only builds whose tag exists in every provider are returned.
+type mergedBuildsProvider struct {
+	providers []buildsProvider
+}
+
+func (m *mergedBuildsProvider) listBuilds(ctx context.Context, limit, offset int) ([]build, error) {
+	const fetchLimit = 100
+
+	type result struct {
+		builds []build
+		err    error
+	}
+	results := make([]result, len(m.providers))
+
+	var wg sync.WaitGroup
+	for i, bp := range m.providers {
+		wg.Add(1)
+		go func(i int, bp buildsProvider) {
+			defer wg.Done()
+			b, err := bp.listBuilds(ctx, fetchLimit, 0)
+			results[i] = result{builds: b, err: err}
+		}(i, bp)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
+
+	// Count how many providers have each tag
+	counts := map[string]int{}
+	byTag := map[string]build{}
+	for _, r := range results {
+		for _, b := range r.builds {
+			counts[b.Tag]++
+			byTag[b.Tag] = b
+		}
+	}
+
+	// Keep only builds present in all providers
+	var all []build
+	for tag, count := range counts {
+		if count == len(m.providers) {
+			all = append(all, byTag[tag])
+		}
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Time.After(all[j].Time)
+	})
+
+	if offset >= len(all) {
+		return nil, nil
+	}
+	all = all[offset:]
+	if limit < len(all) {
+		all = all[:limit]
+	}
+
+	return all, nil
 }
