@@ -80,7 +80,10 @@ func newProviders(ctx context.Context, cfg config) (providers, error) {
 			"static": &staticBuildsProvider{s3: s3Client, bucket: staticBucket},
 		},
 		deployers: map[string]deployer{
-			"server": &serverDeployer{},
+			"server": &serverDeployer{
+				cfg:  cfg,
+				dial: func(addr string) (sshRunner, error) { return sshDial(addr) },
+			},
 			"static": &staticDeployer{},
 		},
 		history: map[string]historyProvider{

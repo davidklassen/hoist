@@ -11,8 +11,9 @@ import (
 
 func newBuildsCmd() *cobra.Command {
 	var (
-		limit   int
-		cfgPath string
+		limit    int
+		cfgPath  string
+		services []string
 	)
 
 	cmd := &cobra.Command{
@@ -30,8 +31,16 @@ func newBuildsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			services := sortedServiceNames(cfg)
-			bp := buildsForServices(cfg, p, services)
+			allServices := sortedServiceNames(cfg)
+			if len(services) > 0 {
+				for _, s := range services {
+					if _, ok := cfg.Services[s]; !ok {
+						return fmt.Errorf("unknown service %q", s)
+					}
+				}
+				allServices = services
+			}
+			bp := buildsForServices(cfg, p, allServices)
 			if bp == nil {
 				return fmt.Errorf("no builds provider available")
 			}
@@ -55,6 +64,7 @@ func newBuildsCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum number of builds to show")
 	cmd.Flags().StringVarP(&cfgPath, "config", "c", "hoist.yml", "config file path")
+	cmd.Flags().StringSliceVarP(&services, "service", "s", nil, "filter by service (comma-separated)")
 
 	return cmd
 }
